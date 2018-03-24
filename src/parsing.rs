@@ -227,10 +227,6 @@ fn parse_threearg(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
 }
 
 named!(parse_instruction<&[u8], Instruction>, do_parse!(
-    /*
-    thing: bits!(take_bits!(u16, 12)) >>
-    (Instruction::Sys(thing))
-    */
     result: bits!(alt!(
         parse_noarg
       | parse_onearg_nnn
@@ -242,10 +238,14 @@ named!(parse_instruction<&[u8], Instruction>, do_parse!(
     (result)
 ));
 
-named!(parse_instructions<&[u8], Vec<Instruction>>, many0!(parse_instruction));
+named!(parse_instructions<&[u8], Vec<Instruction>>, do_parse!(
+    result: many0!(parse_instruction) >>
+    eof!() >>
+    (result)
+));
 
 impl Instruction {
-    pub fn from_slice_one(s: &[u8; 2]) -> Instruction {
+    pub fn from_slice_one(s: &[u8]) -> Instruction {
         let parsed = parse_instruction(s);
 
         match parsed.unwrap() {

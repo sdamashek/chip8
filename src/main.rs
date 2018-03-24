@@ -9,7 +9,8 @@ use cpu::CPUState;
 use parsing::Instruction;
 
 fn main() {
-    let ins = Instruction::from_slice(&[0x4B, 0xE0, 0x88, 0x77]);
-    println!("Parsed: {:?}", ins);
+    let mut c = CPUState::new();
+    c.load_rom("roms/pong.rom").unwrap();
+
     return;
 }

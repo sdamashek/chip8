@@ -1,4 +1,9 @@
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::ErrorKind;
+
 use graphics::Graphics;
+use parsing::Instruction;
 
 // A CPUState struct represents the internal state of a Chip8 CPU.
 // It includes a Graphics struct implemented in graphics.rs.
@@ -19,6 +24,12 @@ pub struct CPUState {
     sp: u16,            // Call stack pointer
 
     key: [bool; 16],    // Key pressed states
+}
+
+pub enum ExecResult <'a> {
+    Success,
+    Fail(&'a str),
+    Exit,
 }
 
 static CHIP8_FONTSET: [u8; 80] =
@@ -67,4 +78,78 @@ impl CPUState {
 
         s
     }
+
+    pub fn load_rom(&mut self, fname: &str) -> Result<(), &str> {
+        let mut f = match File::open(fname) {
+            Ok(f) => f,
+            Err(e) => {
+                match e.kind() {
+                    ErrorKind::NotFound => return Err("File not found"),
+                    _ => return Err("I/O Error opening"),
+                }
+            },
+        };
+
+        let mut buffer = [0; 128];
+        let mut i = 0x200;
+        let mut read = 1;
+
+        while read > 0 {
+            read = match f.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => return Err("I/O Error reading"),
+            };
+            if (i + read) > 0xFFF {
+                // Too many bytes
+                return Err("Too many bytes");
+            }
+            for j in 0..read {
+                self.memory[i + j] = buffer[j];
+            }
+            i += read;
+        }
+
+        Ok(())
+    }
+
+    fn valid_pc(&self, addr: u16) -> bool {
+        addr >= 0x200 && addr <= 0xFFF && addr % 2 == 0
+    }
+
+    fn return_op(&mut self) -> ExecResult {
+        if self.sp == 0 { // Exit
+            return ExecResult::Exit;
+        }
+        
+        self.sp -= 1;
+
+        self.pc = self.stack[self.sp as usize];
+        if !self.valid_pc(self.pc) {
+            return ExecResult::Fail("Invalid return pc");
+        }
+
+        ExecResult::Success
+    }
+
+    fn jump_op(&mut self, addr: u16) -> ExecResult {
+        if !self.valid_addr(addr) {
+            return ExecResult::Fail("Invalid jump");
+        }
+
+        self.pc = addr;
+
+        ExecResult::Success
+    }
+
+    pub fn exec_op(&mut self, op: &Instruction) -> ExecResult {
+        use Instruction::*;
+
+        match op {
+            &Sys(_) => ExecResult::Success, // We ignore the SYS instruction
+            &Ret => self.return_op(),
+            _ => ExecResult::Success,
+        }
+    }
+
+
 }

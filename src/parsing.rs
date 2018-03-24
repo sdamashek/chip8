@@ -1,5 +1,9 @@
+extern crate nom;
+
+use nom::IResult;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Instruction {
+pub enum Instruction {
     Sys(u16),
     Cls,
     Ret,
@@ -37,57 +41,223 @@ enum Instruction {
     LdMV(u8),     // Store [I] in V0-Vx
 }
 
-named!(parse_instruction<&[u8; 2], Instruction>, do_parse!(
-    group_type: take_bits!(u8, 4) >>
-    (match group_type {
-        0 => alt!(
-              map!(tag_bits!(u16, 12, 0x0E0), |_| Cls)
-            | map!(tag_bits!(u16, 12, 0x0EE), |_| Ret)
-            | map!(take_bits!(u16, 12), |addr| Sys(addr))),
-        1 => map!(take_bits!(u16, 12), |addr| Jp(addr)),
-        2 => map!(take_bits!(u16, 12), |addr| Call(addr)),
-        3 => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 8)), |(Vx, byte)| SeV(Vx, byte)),
-        4 => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 8)), |(Vx, byte)| SneV(Vx, byte)),
-        5 => (
-            map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Se(Vx, Vy))
-            >> tag_bits!(u8, 4, 0x0)),
-        6 => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 8)), |(Vx, byte)| LdV(Vx, byte)),
-        7 => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 8)), |(Vx, byte)| AddV(Vx, byte)),
-        8 => alt!(
-              (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Ld(Vx, Vy)) >> tag_bits!(u8, 4, 0x0))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Or(Vx, Vy)) >> tag_bits!(u8, 4, 0x1))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| And(Vx, Vy)) >> tag_bits!(u8, 4, 0x2))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Xor(Vx, Vy)) >> tag_bits!(u8, 4, 0x3))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Add(Vx, Vy)) >> tag_bits!(u8, 4, 0x4))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Sub(Vx, Vy)) >> tag_bits!(u8, 4, 0x5))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Shr(Vx, Vy)) >> tag_bits!(u8, 4, 0x6))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Subn(Vx, Vy)) >> tag_bits!(u8, 4, 0x7))
-            | (map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Shl(Vx, Vy)) >> tag_bits!(u8, 4, 0xe))),
-        9 => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy)| Sne(Vx, Vy)),
-        0xa => map!(take_bits!(u16, 12), |addr| LdI(addr)),
-        0xb => map!(take_bits!(u16, 12), |addr| JpV0(addr)),
-        0xc => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 8)), |(Vx, byte)| Rnd(Vx, byte)),
-        0xd => map!(tuple!(take_bits!(u8, 4), take_bits!(u8, 4), take_bits!(u8, 4)), |(Vx, Vy, nibble)| Drw(Vx, Vy, nibble)),
-        0xe => alt!(
-                (map!(take_bits!(u8, 4), |Vx| Skp(Vx)) >> tag_bits!(u8, 8, 0x9e))
-              | (map!(take_bits!(u8, 4), |Vx| Sknp(Vx)) >> tag_bits!(u8, 8, 0xa1))),
-        0xf => alt!(
-                (map!(take_bits!(u8, 4), |Vx| LdDt(Vx)) >> tag_bits!(u8, 8, 0x07))
-              | (map!(take_bits!(u8, 4), |Vx| LdK(Vx)) >> tag_bits!(u8, 8, 0x0a))
-              | (map!(take_bits!(u8, 4), |Vx| LdTd(Vx)) >> tag_bits!(u8, 8, 0x15))
-              | (map!(take_bits!(u8, 4), |Vx| LdSt(Vx)) >> tag_bits!(u8, 8, 0x18))
-              | (map!(take_bits!(u8, 4), |Vx| AddI(Vx)) >> tag_bits!(u8, 8, 0x1e))
-              | (map!(take_bits!(u8, 4), |Vx| LdS(Vx)) >> tag_bits!(u8, 8, 0x29))
-              | (map!(take_bits!(u8, 4), |Vx| LdBCD(Vx)) >> tag_bits!(u8, 8, 0x33))
-              | (map!(take_bits!(u8, 4), |Vx| LdVM(Vx)) >> tag_bits!(u8, 8, 0x55))
-              | (map!(take_bits!(u8, 4), |Vx| LdMV(Vx)) >> tag_bits!(u8, 8, 0x65))),
-    }))
-);
+fn parse_noarg(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
+    let (remaining, constant) = match take_bits!(inp, u16, 16) {
+        IResult::Done(remaining, constant) => (remaining, constant),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let ins = match constant {
+        0x00E0 => Instruction::Cls,
+        0x00EE => Instruction::Ret,
+        _      => return IResult::Error(nom::ErrorKind::TagBits),
+    };
+
+    IResult::Done(remaining, ins)
+}
+
+fn parse_onearg_nnn(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
+    let (remaining, group) = match take_bits!(inp, u8, 4) {
+        IResult::Done(remaining, group) => (remaining, group),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+    
+    let (remaining, arg) = match take_bits!(remaining, u16, 12) {
+        IResult::Done(remaining, arg) => (remaining, arg),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let ins = match group {
+        0x0 => Instruction::Sys(arg),
+        0x1 => Instruction::Jp(arg),
+        0x2 => Instruction::Call(arg),
+        0xA => Instruction::LdI(arg),
+        0xB => Instruction::JpV0(arg),
+        _   => return IResult::Error(nom::ErrorKind::TagBits),
+    };
+
+    IResult::Done(remaining, ins)
+}
+
+fn parse_onearg_x(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
+    let (remaining, group) = match take_bits!(inp, u8, 4) {
+        IResult::Done(remaining, group) => (remaining, group),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+    
+    let (remaining, x) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, x) => (remaining, x),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, id) = match take_bits!(remaining, u8, 8) {
+        IResult::Done(remaining, id) => (remaining, id),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let ins = match (group, id) {
+        (0xE, 0x9E) => Instruction::Skp(x),
+        (0xE, 0xA1) => Instruction::Sknp(x),
+        (0xF, 0x07) => Instruction::LdDt(x),
+        (0xF, 0x0A) => Instruction::LdK(x),
+        (0xF, 0x15) => Instruction::LdTd(x),
+        (0xF, 0x18) => Instruction::LdSt(x),
+        (0xF, 0x1E) => Instruction::AddI(x),
+        (0xF, 0x29) => Instruction::LdS(x),
+        (0xF, 0x33) => Instruction::LdBCD(x),
+        (0xF, 0x55) => Instruction::LdVM(x),
+        (0xF, 0x65) => Instruction::LdMV(x),
+        _           => return IResult::Error(nom::ErrorKind::TagBits),
+    };
+
+    IResult::Done(remaining, ins)
+}
+
+fn parse_twoarg_xkk(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
+    let (remaining, group) = match take_bits!(inp, u8, 4) {
+        IResult::Done(remaining, group) => (remaining, group),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, x) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, x) => (remaining, x),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, kk) = match take_bits!(remaining, u8, 8) {
+        IResult::Done(remaining, kk) => (remaining, kk),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let ins = match group {
+        0x3 => Instruction::SeV(x, kk),
+        0x4 => Instruction::SneV(x, kk),
+        0x6 => Instruction::LdV(x, kk),
+        0x7 => Instruction::AddV(x, kk),
+        0xC => Instruction::Rnd(x, kk),
+        _   => return IResult::Error(nom::ErrorKind::TagBits),
+    };
+
+    IResult::Done(remaining, ins)
+}
+
+fn parse_twoarg_xy(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
+    let (remaining, group) = match take_bits!(inp, u8, 4) {
+        IResult::Done(remaining, group) => (remaining, group),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+    
+    let (remaining, x) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, x) => (remaining, x),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, y) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, y) => (remaining, y),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, id) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, id) => (remaining, id),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let ins = match (group, id) {
+        (0x5, 0x0) => Instruction::Se(x, y),
+        (0x8, 0x0) => Instruction::Ld(x, y),
+        (0x8, 0x1) => Instruction::Or(x, y),
+        (0x8, 0x2) => Instruction::And(x, y),
+        (0x8, 0x3) => Instruction::Xor(x, y),
+        (0x8, 0x4) => Instruction::Add(x, y),
+        (0x8, 0x5) => Instruction::Sub(x, y),
+        (0x8, 0x6) => Instruction::Shr(x),
+        (0x8, 0x7) => Instruction::Subn(x, y),
+        (0x8, 0xE) => Instruction::Shl(x),
+        (0x9, 0x0) => Instruction::Sne(x, y),
+        _          => return IResult::Error(nom::ErrorKind::TagBits),
+    };
+
+    IResult::Done(remaining, ins)
+}
+
+fn parse_threearg(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
+    let (remaining, group) = match take_bits!(inp, u8, 4) {
+        IResult::Done(remaining, group) => (remaining, group),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+    
+    let (remaining, x) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, x) => (remaining, x),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, y) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, y) => (remaining, y),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+
+    let (remaining, z) = match take_bits!(remaining, u8, 4) {
+        IResult::Done(remaining, z) => (remaining, z),
+        IResult::Error(e) => return IResult::Error(e),
+        IResult::Incomplete(i) => return IResult::Incomplete(i),
+    };
+    
+    let ins = match group {
+        0xD => Instruction::Drw(x, y, z),
+        _   => return IResult::Error(nom::ErrorKind::TagBits),
+    };
+
+    IResult::Done(remaining, ins)
+}
+
+named!(parse_instruction<&[u8], Instruction>, do_parse!(
+    /*
+    thing: bits!(take_bits!(u16, 12)) >>
+    (Instruction::Sys(thing))
+    */
+    result: bits!(alt!(
+        parse_noarg
+      | parse_onearg_nnn
+      | parse_onearg_x
+      | parse_twoarg_xkk
+      | parse_twoarg_xy
+      | parse_threearg
+      )) >>
+    (result)
+));
+
+named!(parse_instructions<&[u8], Vec<Instruction>>, many0!(parse_instruction));
 
 impl Instruction {
-    fn from_slice(s: &[u8; 2]) -> Instruction {
-        match parse_instruction(s).unwrap() {
-           Done(I, O) => O,
+    pub fn from_slice_one(s: &[u8; 2]) -> Instruction {
+        let parsed = parse_instruction(s);
+
+        match parsed.unwrap() {
+           (_, o) => o,
+        }
+    }
+
+    pub fn from_slice(s: &[u8]) -> Vec<Instruction> {
+        let parsed = parse_instructions(s);
+
+        match parsed.unwrap() {
+            (_, o) => o,
         }
     }
 }

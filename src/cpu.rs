@@ -2,8 +2,8 @@ use graphics::Graphics;
 
 // A CPUState struct represents the internal state of a Chip8 CPU.
 // It includes a Graphics struct implemented in graphics.rs.
-#[derive(Debug)]
-struct CPUState {
+#[allow(non_snake_case)]
+pub struct CPUState {
     V: [u8; 16],        // General purpose registers: V0, V1, ..., V15
     I: u16,             // Index register 
     pc: u16,            // Program counter (pc)
@@ -21,7 +21,7 @@ struct CPUState {
     key: [bool; 16],    // Key pressed states
 }
 
-static chip8_fontset: [u8; 80] =
+static CHIP8_FONTSET: [u8; 80] =
 [
   0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
   0x20, 0x60, 0x20, 0x20, 0x70, // 1
@@ -42,8 +42,8 @@ static chip8_fontset: [u8; 80] =
 ];
 
 impl CPUState {
-    fn new() -> CPUState {
-        let s = CPUState {
+    pub fn new() -> CPUState {
+        let mut s = CPUState {
             V: [0; 16],
             I: 0,
             pc: 0x200, // PC starts at 0x200
@@ -61,8 +61,8 @@ impl CPUState {
             key: [false; 16],
         };
 
-        for i in (0..80) {
-            s.memory[i] = chip8_fontset[i]; // Fill in fontset
+        for i in 0..80 {
+            s.memory[i] = CHIP8_FONTSET[i]; // Fill in fontset
         }
 
         s

@@ -1,9 +1,9 @@
 #[derive(Debug)]
-struct Graphics {
+pub struct Graphics {
 }
 
 impl Graphics {
-    fn new() -> Graphics {
+    pub fn new() -> Graphics {
         Graphics { }
     }
 }

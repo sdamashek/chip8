@@ -1,34 +1,33 @@
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
-use std::sync::{Arc, Condvar, Mutex};
+use std::{thread, time};
 use rand;
 use rand::Rng;
 
-use graphics::Graphics;
+use graphics::{Graphics, DrawResult};
 use parsing::Instruction;
 
 // A CPUState struct represents the internal state of a Chip8 CPU.
 // It includes a Graphics struct implemented in graphics.rs.
 #[allow(non_snake_case)]
-pub struct CPUState <'a> {
+pub struct CPUState {
     V: [u8; 16],        // General purpose registers: V0, V1, ..., V15
     I: u16,             // Index register 
     pc: u16,            // Program counter (pc)
 
     memory: [u8; 4096], // 4K memory
 
-    graphics: Graphics<'a>, // Graphics struct
+    graphics: Graphics, // Graphics struct
 
     delay_timer: u8,
     sound_timer: u8,    // Sound and delay timers
 
     stack: [u16; 16],   // Call stack
     sp: u16,            // Call stack pointer
-
-    keys: Arc<(Mutex<[bool; 16]>, Condvar)>,    // Key pressed states
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecResult <'a> {
     Success,
     Fail(&'a str),
@@ -55,8 +54,8 @@ static CHIP8_FONTSET: [u8; 80] =
   0xF0, 0x80, 0xF0, 0x80, 0x80  // F
 ];
 
-impl<'a> CPUState<'a> {
-    pub fn new() -> CPUState<'a> {
+impl CPUState {
+    pub fn new() -> CPUState {
         let mut s = CPUState {
             V: [0; 16],
             I: 0,
@@ -71,8 +70,6 @@ impl<'a> CPUState<'a> {
 
             stack: [0; 16],
             sp: 0,
-
-            keys: Arc::new((Mutex::new([false; 16]), Condvar::new())),
         };
 
         for i in 0..80 {
@@ -120,7 +117,7 @@ impl<'a> CPUState<'a> {
     }
 
     fn valid_pc(&self, addr: u16) -> bool {
-        addr >= 0x200 && addr <= 0xFFF && addr % 2 == 0
+        addr >= 0x200 && addr <= 0xFFF
     }
 
     fn valid_reg(&self, vx: u8) -> bool {
@@ -135,6 +132,29 @@ impl<'a> CPUState<'a> {
         }
 
         None
+    }
+
+    fn clear_op(&mut self) -> ExecResult {
+        self.graphics.clear();
+
+        ExecResult::Success
+    }
+
+    fn draw_op(&mut self, vx: u8, vy: u8, n: u8) -> ExecResult {
+        if !self.valid_reg(vx) || !self.valid_reg(vy) {
+            return ExecResult::Fail("Invalid register(s)");
+        }
+        
+        let x = self.V[vx as usize];
+        let y = self.V[vy as usize];
+
+        let mem = &self.memory[(self.I as usize)..(self.I as usize + n as usize)];
+        match self.graphics.draw_sprite(x, y, mem) {
+            DrawResult::Collision => self.V[0xF] = 1,
+            DrawResult::Success   => self.V[0xF] = 0,
+        };
+
+        ExecResult::Success
     }
 
     fn return_op(&mut self) -> ExecResult {
@@ -203,7 +223,7 @@ impl<'a> CPUState<'a> {
             return ExecResult::Fail("Invalid register(s)");
         }
 
-        self.V[vx as usize] += self.V[vy as usize];
+        self.V[vx as usize] = self.V[vy as usize];
 
         ExecResult::Success
     }
@@ -322,10 +342,9 @@ impl<'a> CPUState<'a> {
             return ExecResult::Fail("Invalid register");
         }
 
-        let &(ref kmutex, _) = &*(self.keys);
+        let x = self.V[vx as usize];
 
-        let keys = kmutex.lock().unwrap();
-        if keys[vx as usize] == down {
+        if self.graphics.keys[x as usize] == down {
             self.pc += 2;
         }
         
@@ -347,13 +366,11 @@ impl<'a> CPUState<'a> {
             return ExecResult::Fail("Invalid register");
         }
 
-        let &(ref kmutex, ref kcond) = &*(self.keys);
-        let mut pressed = kmutex.lock().unwrap();
-        let mut k = self.active_key(&*pressed);
-
+        let mut k = self.active_key(&(self.graphics.keys));
+        
         while k == None {
-            pressed = kcond.wait(pressed).unwrap();
-            k = self.active_key(&*pressed);
+            self.graphics.draw_events();
+            k = self.active_key(&(self.graphics.keys));
         }
 
         self.V[vx as usize] = k.unwrap();
@@ -391,8 +408,12 @@ impl<'a> CPUState<'a> {
         ExecResult::Success
     }
 
-    fn loads_op(&mut self, num: u8) -> ExecResult {
-        self.I = 5 * (num as u16);
+    fn loads_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.I = 5 * (self.V[vx as usize] as u16);
 
         ExecResult::Success
     }
@@ -458,7 +479,7 @@ impl<'a> CPUState<'a> {
 
         match op {
             &Sys(_)     => ExecResult::Success, // We ignore the SYS instruction
-            &Cls        => ExecResult::Success, // TODO
+            &Cls        => self.clear_op(),
             &Ret        => self.return_op(),
             &Jp(addr)   => self.jump_op(addr),
             &Call(addr) => self.call_op(addr),
@@ -474,13 +495,13 @@ impl<'a> CPUState<'a> {
             &Xor(vx, vy)    => self.arith_op(vx, vy, |a, b| a ^ b),
             &Add(vx, vy)    => self.add_op(vx, vy),
             &Sub(vx, vy)    => self.sub_op(vx, vy),
-            &Shr(vx)    => self.arith_op(vx, vx, |a, _| a << 1),
+            &Shr(vx)        => self.arith_op(vx, vx, |a, _| a >> 1),
             &Subn(vx, vy)   => self.sub_op(vy, vx),
-            &Shl(vx)    => self.arith_op(vx, vx, |a, _| a >> 1),
+            &Shl(vx)        => self.arith_op(vx, vx, |a, _| a << 1),
             &LdI(addr)      => self.loadi_op(addr),
             &JpV0(addr)     => self.jumpv0_op(addr),
             &Rnd(vx, byte)  => self.rand_op(vx, byte),
-            &Drw(vx, vy, n) => ExecResult::Success, // TODO
+            &Drw(vx, vy, n) => self.draw_op(vx, vy, n),
             &Skp(vx)        => self.skipk_op(vx, true),
             &Sknp(vx)       => self.skipk_op(vx, false),
             &LdDt(vx)       => self.loaddt_op(vx),
@@ -488,33 +509,67 @@ impl<'a> CPUState<'a> {
             &LdTd(vx)       => self.loadtd_op(vx),
             &LdSt(vx)       => self.loadst_op(vx),
             &AddI(vx)       => self.addi_op(vx),
-            &LdS(num)       => self.loads_op(num),
+            &LdS(vx)        => self.loads_op(vx),
             &LdBCD(vx)      => self.loadbcd_op(vx),
             &LdVM(vx)       => self.loadvm_op(vx),
             &LdMV(vx)       => self.loadmv_op(vx),
         }
     }
 
+    fn print_regs(&self) {
+        print!("pc = {}, ", self.pc);
+        for i in 0..16 {
+            print!("V{} = {}, ", i, self.V[i]);
+        }
+        println!("");
+    }
+
     // Run starting at PC (initially 0x200)
     pub fn run(&mut self) {
-        loop {
+        'main: loop {
+            self.graphics.draw_events();
+
             let ins = 
             {
                 let memslice = &(self.memory)[(self.pc as usize)..(self.pc as usize + 2)];
 
                 match Instruction::from_slice_one(memslice) {
                     Some(ins) => ins,
-                    None => {println!("Invalid instruction {:?}", memslice); return;},
+                    None => {println!("Invalid instruction {:?}", memslice); break 'main;},
                 }
             };
 
-            self.pc += 2;
+            /*
+            println!("{:?}", ins);
+            print!("pc = {}, ", self.pc);
+            for i in 0..16 {
+                print!("V{} = {}, ", i, self.V[i]);
+            }
+            println!("");
+            */
 
-            match self.exec_op(&ins) {
-                ExecResult::Fail(e) => {println!("Error {:?}", e); return;},
-                ExecResult::Exit => return,
+            self.pc += 2;
+            
+            match self.exec_op(&ins).clone() {
+                ExecResult::Fail(e) =>
+                    {
+                        println!("Error {:?}", e);
+                        println!("Instruction: {:?}", &ins);
+                        break 'main;
+                    },
+                ExecResult::Exit => break 'main,
                 ExecResult::Success => (),
             }
+
+            if self.delay_timer > 0 {
+                self.delay_timer -= 1;
+            }
+            if self.sound_timer > 0 {
+                self.graphics.beep();
+                self.sound_timer -= 1;
+            }
+
+            thread::sleep(time::Duration::from_millis(5));
         }
     }
 }

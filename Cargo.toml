@@ -5,3 +5,5 @@ authors = ["Samuel Damashek <samuel.damashek@gmail.com>"]
 
 [dependencies]
 nom = "3.2.1"
+rand = "0.4"
+piston_window = "0.70.0"

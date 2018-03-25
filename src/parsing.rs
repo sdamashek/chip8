@@ -1,6 +1,4 @@
-extern crate nom;
-
-use nom::IResult;
+use nom::{IResult, ErrorKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Instruction {
@@ -51,7 +49,7 @@ fn parse_noarg(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
     let ins = match constant {
         0x00E0 => Instruction::Cls,
         0x00EE => Instruction::Ret,
-        _      => return IResult::Error(nom::ErrorKind::TagBits),
+        _      => return IResult::Error(ErrorKind::TagBits),
     };
 
     IResult::Done(remaining, ins)
@@ -76,7 +74,7 @@ fn parse_onearg_nnn(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction>
         0x2 => Instruction::Call(arg),
         0xA => Instruction::LdI(arg),
         0xB => Instruction::JpV0(arg),
-        _   => return IResult::Error(nom::ErrorKind::TagBits),
+        _   => return IResult::Error(ErrorKind::TagBits),
     };
 
     IResult::Done(remaining, ins)
@@ -113,7 +111,7 @@ fn parse_onearg_x(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
         (0xF, 0x33) => Instruction::LdBCD(x),
         (0xF, 0x55) => Instruction::LdVM(x),
         (0xF, 0x65) => Instruction::LdMV(x),
-        _           => return IResult::Error(nom::ErrorKind::TagBits),
+        _           => return IResult::Error(ErrorKind::TagBits),
     };
 
     IResult::Done(remaining, ins)
@@ -144,7 +142,7 @@ fn parse_twoarg_xkk(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction>
         0x6 => Instruction::LdV(x, kk),
         0x7 => Instruction::AddV(x, kk),
         0xC => Instruction::Rnd(x, kk),
-        _   => return IResult::Error(nom::ErrorKind::TagBits),
+        _   => return IResult::Error(ErrorKind::TagBits),
     };
 
     IResult::Done(remaining, ins)
@@ -187,7 +185,7 @@ fn parse_twoarg_xy(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> 
         (0x8, 0x7) => Instruction::Subn(x, y),
         (0x8, 0xE) => Instruction::Shl(x),
         (0x9, 0x0) => Instruction::Sne(x, y),
-        _          => return IResult::Error(nom::ErrorKind::TagBits),
+        _          => return IResult::Error(ErrorKind::TagBits),
     };
 
     IResult::Done(remaining, ins)
@@ -220,7 +218,7 @@ fn parse_threearg(inp: (&[u8], usize)) -> IResult<(&[u8], usize), Instruction> {
     
     let ins = match group {
         0xD => Instruction::Drw(x, y, z),
-        _   => return IResult::Error(nom::ErrorKind::TagBits),
+        _   => return IResult::Error(ErrorKind::TagBits),
     };
 
     IResult::Done(remaining, ins)
@@ -245,11 +243,13 @@ named!(parse_instructions<&[u8], Vec<Instruction>>, do_parse!(
 ));
 
 impl Instruction {
-    pub fn from_slice_one(s: &[u8]) -> Instruction {
+    pub fn from_slice_one(s: &[u8]) -> Option<Instruction> {
         let parsed = parse_instruction(s);
 
-        match parsed.unwrap() {
-           (_, o) => o,
+        match parsed {
+           IResult::Done(_, o) => Some(o),
+           IResult::Error(_) => None,
+           IResult::Incomplete(_) => None,
         }
     }
 

@@ -1,6 +1,9 @@
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
+use std::sync::{Arc, Condvar, Mutex};
+use rand;
+use rand::Rng;
 
 use graphics::Graphics;
 use parsing::Instruction;
@@ -8,14 +11,14 @@ use parsing::Instruction;
 // A CPUState struct represents the internal state of a Chip8 CPU.
 // It includes a Graphics struct implemented in graphics.rs.
 #[allow(non_snake_case)]
-pub struct CPUState {
+pub struct CPUState <'a> {
     V: [u8; 16],        // General purpose registers: V0, V1, ..., V15
     I: u16,             // Index register 
     pc: u16,            // Program counter (pc)
 
     memory: [u8; 4096], // 4K memory
 
-    graphics: Graphics, // Graphics struct
+    graphics: Graphics<'a>, // Graphics struct
 
     delay_timer: u8,
     sound_timer: u8,    // Sound and delay timers
@@ -23,7 +26,7 @@ pub struct CPUState {
     stack: [u16; 16],   // Call stack
     sp: u16,            // Call stack pointer
 
-    key: [bool; 16],    // Key pressed states
+    keys: Arc<(Mutex<[bool; 16]>, Condvar)>,    // Key pressed states
 }
 
 pub enum ExecResult <'a> {
@@ -52,8 +55,8 @@ static CHIP8_FONTSET: [u8; 80] =
   0xF0, 0x80, 0xF0, 0x80, 0x80  // F
 ];
 
-impl CPUState {
-    pub fn new() -> CPUState {
+impl<'a> CPUState<'a> {
+    pub fn new() -> CPUState<'a> {
         let mut s = CPUState {
             V: [0; 16],
             I: 0,
@@ -69,7 +72,7 @@ impl CPUState {
             stack: [0; 16],
             sp: 0,
 
-            key: [false; 16],
+            keys: Arc::new((Mutex::new([false; 16]), Condvar::new())),
         };
 
         for i in 0..80 {
@@ -112,8 +115,26 @@ impl CPUState {
         Ok(())
     }
 
+    fn valid_addr(&self, addr: u16) -> bool {
+        addr <= 0xFFF
+    }
+
     fn valid_pc(&self, addr: u16) -> bool {
         addr >= 0x200 && addr <= 0xFFF && addr % 2 == 0
+    }
+
+    fn valid_reg(&self, vx: u8) -> bool {
+        vx < 16
+    }
+
+    fn active_key(&self, keys: &[bool; 16]) -> Option<u8> {
+        for k in 0..16 {
+            if keys[k as usize] {
+                return Some(k);
+            }
+        }
+
+        None
     }
 
     fn return_op(&mut self) -> ExecResult {
@@ -132,7 +153,7 @@ impl CPUState {
     }
 
     fn jump_op(&mut self, addr: u16) -> ExecResult {
-        if !self.valid_addr(addr) {
+        if !self.valid_pc(addr) {
             return ExecResult::Fail("Invalid jump");
         }
 
@@ -141,15 +162,359 @@ impl CPUState {
         ExecResult::Success
     }
 
-    pub fn exec_op(&mut self, op: &Instruction) -> ExecResult {
+    fn call_op(&mut self, addr: u16) -> ExecResult {
+        if !self.valid_pc(addr) {
+            return ExecResult::Fail("Invalid call");
+        }
+        if self.sp >= 16 {
+            return ExecResult::Fail("Stack overflow");
+        }
+
+        self.stack[self.sp as usize] = self.pc;
+        self.sp += 1;
+
+        self.pc = addr;
+
+        ExecResult::Success
+    }
+
+    fn loadv_op(&mut self, vx: u8, byte: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.V[vx as usize] = byte;
+
+        ExecResult::Success
+    }
+
+    fn addv_op(&mut self, vx: u8, byte: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.V[vx as usize] += byte;
+
+        ExecResult::Success
+    }
+
+    fn load_op(&mut self, vx: u8, vy: u8) -> ExecResult {
+        if !self.valid_reg(vx) || !self.valid_reg(vy) {
+            return ExecResult::Fail("Invalid register(s)");
+        }
+
+        self.V[vx as usize] += self.V[vy as usize];
+
+        ExecResult::Success
+    }
+
+    fn skipv_op(&mut self, vx: u8, byte: u8,
+                cond: fn(u8, u8) -> bool) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+    
+        if cond(self.V[vx as usize], byte) {
+            self.pc += 2;
+        }
+
+        ExecResult::Success
+    }
+
+    fn skip_op(&mut self, vx: u8, vy: u8,
+               cond: fn(u8, u8) -> bool) -> ExecResult {
+        if !self.valid_reg(vx) || !self.valid_reg(vy) {
+            return ExecResult::Fail("Invalid register(s)");
+        }
+
+        if cond(self.V[vx as usize], self.V[vy as usize]) {
+            self.pc += 2;
+        }
+
+        ExecResult::Success
+    }
+
+    fn arith_op(&mut self, vx: u8, vy: u8,
+                arith: fn(u8, u8) -> u8) -> ExecResult {
+        if !self.valid_reg(vx) || !self.valid_reg(vy) {
+            return ExecResult::Fail("Invalid register(s)");
+        }
+
+        let res = arith(self.V[vx as usize], self.V[vy as usize]);
+        self.V[vx as usize] = res;
+
+        ExecResult::Success
+    }
+
+    fn add_op(&mut self, vx: u8, vy: u8) -> ExecResult {
+        if !self.valid_reg(vx) || !self.valid_reg(vy) {
+            return ExecResult::Fail("Invalid register(s)");
+        }
+
+        let arg1 = self.V[vx as usize];
+        let arg2 = self.V[vy as usize];
+
+        let res: u16 = (arg1 as u16) + (arg2 as u16);
+        if res > 255 { // Overflow
+            self.V[0xF] = 1;
+        }
+        else {
+            self.V[0xF] = 0;
+        }
+
+        self.V[vx as usize] = arg1 + arg2;
+
+        ExecResult::Success
+    }
+
+    fn sub_op(&mut self, vx: u8, vy: u8) -> ExecResult {
+        if !self.valid_reg(vx) || !self.valid_reg(vy) {
+            return ExecResult::Fail("Invalid register(s)");
+        }
+
+        let arg1 = self.V[vx as usize];
+        let arg2 = self.V[vy as usize];
+
+        if arg1 > arg2 { // No carry
+            self.V[0xF] = 1;
+        }
+        else {
+            self.V[0xF] = 0;
+        }
+
+        self.V[vx as usize] = arg1 - arg2;
+
+        ExecResult::Success
+    }
+
+    fn loadi_op(&mut self, addr: u16) -> ExecResult {
+        self.I = addr;
+
+        ExecResult::Success
+    }
+
+    fn jumpv0_op(&mut self, addr: u16) -> ExecResult {
+        let dest = (self.V[0] as u16) + addr;
+
+        if !self.valid_pc(dest) {
+            return ExecResult::Fail("Invalid jump destination");
+        }
+
+        self.pc = dest;
+
+        ExecResult::Success
+    }
+
+    fn rand_op(&mut self, vx: u8, byte: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        let val: u8 = rand::thread_rng().gen();
+
+        self.V[vx as usize] = val & byte;
+
+        ExecResult::Success
+    }
+
+    fn skipk_op(&mut self, vx: u8, down: bool) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        let &(ref kmutex, _) = &*(self.keys);
+
+        let keys = kmutex.lock().unwrap();
+        if keys[vx as usize] == down {
+            self.pc += 2;
+        }
+        
+        ExecResult::Success
+    }
+
+    fn loaddt_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.V[vx as usize] = self.delay_timer;
+
+        ExecResult::Success
+    }
+
+    fn loadwaitk_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        let &(ref kmutex, ref kcond) = &*(self.keys);
+        let mut pressed = kmutex.lock().unwrap();
+        let mut k = self.active_key(&*pressed);
+
+        while k == None {
+            pressed = kcond.wait(pressed).unwrap();
+            k = self.active_key(&*pressed);
+        }
+
+        self.V[vx as usize] = k.unwrap();
+
+        ExecResult::Success
+    }
+
+    fn loadtd_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.delay_timer = self.V[vx as usize];
+
+        ExecResult::Success
+    }
+
+    fn loadst_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.sound_timer = self.V[vx as usize];
+
+        ExecResult::Success
+    }
+
+    fn addi_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+
+        self.I += self.V[vx as usize] as u16;
+
+        ExecResult::Success
+    }
+
+    fn loads_op(&mut self, num: u8) -> ExecResult {
+        self.I = 5 * (num as u16);
+
+        ExecResult::Success
+    }
+
+    fn loadbcd_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+        if !self.valid_addr(self.I + 2) {
+            return ExecResult::Fail("Invalid destination addr");
+        }
+
+        let mut val = self.V[vx as usize];
+
+        let hundreds = val / 100;
+        val %= 100;
+        let tens = val / 10;
+        val %= 10;
+        let ones = val;
+
+        self.memory[self.I as usize] = hundreds;
+        self.memory[(self.I + 1) as usize] = tens;
+        self.memory[(self.I + 2) as usize] = ones;
+
+        ExecResult::Success
+    }
+
+    fn loadvm_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+        if !self.valid_addr(self.I + vx as u16) {
+            return ExecResult::Fail("Invalid destination addr");
+        }
+
+        for i in 0..(vx + 1) {
+            self.memory[(self.I + (i as u16)) as usize] = self.V[i as usize];
+        }
+
+        ExecResult::Success
+    }
+
+    fn loadmv_op(&mut self, vx: u8) -> ExecResult {
+        if !self.valid_reg(vx) {
+            return ExecResult::Fail("Invalid register");
+        }
+        if !self.valid_addr(self.I + vx as u16) {
+            return ExecResult::Fail("Invalid destination addr");
+        }
+
+        for i in 0..(vx + 1) {
+            self.V[i as usize] = self.memory[(self.I + i as u16) as usize];
+        }
+
+        ExecResult::Success
+    }
+
+    // exec_op executes one CHIP8 instruction.
+    // exec_op assumes that PC has already been incremented by 2,
+    // and so accordingly PC is the address of the _next_ instruction.
+    fn exec_op(&mut self, op: &Instruction) -> ExecResult {
         use Instruction::*;
 
         match op {
-            &Sys(_) => ExecResult::Success, // We ignore the SYS instruction
-            &Ret => self.return_op(),
-            _ => ExecResult::Success,
+            &Sys(_)     => ExecResult::Success, // We ignore the SYS instruction
+            &Cls        => ExecResult::Success, // TODO
+            &Ret        => self.return_op(),
+            &Jp(addr)   => self.jump_op(addr),
+            &Call(addr) => self.call_op(addr),
+            &SeV(vx, byte)  => self.skipv_op(vx, byte, |a, b| a == b),
+            &SneV(vx, byte) => self.skipv_op(vx, byte, |a, b| a != b),
+            &Se(vx, vy)     => self.skip_op(vx, vy, |a, b| a == b),
+            &Sne(vx, vy)    => self.skip_op(vx, vy, |a, b| a != b),
+            &LdV(vx, byte)  => self.loadv_op(vx, byte),
+            &AddV(vx, byte) => self.addv_op(vx, byte),
+            &Ld(vx, vy)     => self.load_op(vx, vy),
+            &Or(vx, vy)     => self.arith_op(vx, vy, |a, b| a | b),
+            &And(vx, vy)    => self.arith_op(vx, vy, |a, b| a & b),
+            &Xor(vx, vy)    => self.arith_op(vx, vy, |a, b| a ^ b),
+            &Add(vx, vy)    => self.add_op(vx, vy),
+            &Sub(vx, vy)    => self.sub_op(vx, vy),
+            &Shr(vx)    => self.arith_op(vx, vx, |a, _| a << 1),
+            &Subn(vx, vy)   => self.sub_op(vy, vx),
+            &Shl(vx)    => self.arith_op(vx, vx, |a, _| a >> 1),
+            &LdI(addr)      => self.loadi_op(addr),
+            &JpV0(addr)     => self.jumpv0_op(addr),
+            &Rnd(vx, byte)  => self.rand_op(vx, byte),
+            &Drw(vx, vy, n) => ExecResult::Success, // TODO
+            &Skp(vx)        => self.skipk_op(vx, true),
+            &Sknp(vx)       => self.skipk_op(vx, false),
+            &LdDt(vx)       => self.loaddt_op(vx),
+            &LdK(vx)        => self.loadwaitk_op(vx),
+            &LdTd(vx)       => self.loadtd_op(vx),
+            &LdSt(vx)       => self.loadst_op(vx),
+            &AddI(vx)       => self.addi_op(vx),
+            &LdS(num)       => self.loads_op(num),
+            &LdBCD(vx)      => self.loadbcd_op(vx),
+            &LdVM(vx)       => self.loadvm_op(vx),
+            &LdMV(vx)       => self.loadmv_op(vx),
         }
     }
 
+    // Run starting at PC (initially 0x200)
+    pub fn run(&mut self) {
+        loop {
+            let ins = 
+            {
+                let memslice = &(self.memory)[(self.pc as usize)..(self.pc as usize + 2)];
 
+                match Instruction::from_slice_one(memslice) {
+                    Some(ins) => ins,
+                    None => {println!("Invalid instruction {:?}", memslice); return;},
+                }
+            };
+
+            self.pc += 2;
+
+            match self.exec_op(&ins) {
+                ExecResult::Fail(e) => {println!("Error {:?}", e); return;},
+                ExecResult::Exit => return,
+                ExecResult::Success => (),
+            }
+        }
+    }
 }

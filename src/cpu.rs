@@ -79,6 +79,7 @@ impl CPUState {
         s
     }
 
+    // Load a ROM from fname into memory starting at 0x200.
     pub fn load_rom(&mut self, fname: &str) -> Result<(), &str> {
         let mut f = match File::open(fname) {
             Ok(f) => f,
@@ -124,6 +125,7 @@ impl CPUState {
         vx < 16
     }
 
+    // Return the first active key, if any.
     fn active_key(&self, keys: &[bool; 16]) -> Option<u8> {
         for k in 0..16 {
             if keys[k as usize] {
@@ -516,6 +518,7 @@ impl CPUState {
         }
     }
 
+    // Print registers (for debug purposes)
     fn print_regs(&self) {
         print!("pc = {}, ", self.pc);
         for i in 0..16 {
@@ -539,15 +542,6 @@ impl CPUState {
                 }
             };
 
-            /*
-            println!("{:?}", ins);
-            print!("pc = {}, ", self.pc);
-            for i in 0..16 {
-                print!("V{} = {}, ", i, self.V[i]);
-            }
-            println!("");
-            */
-
             self.pc += 2;
             
             match self.exec_op(&ins).clone() {
@@ -565,7 +559,7 @@ impl CPUState {
                 self.delay_timer -= 1;
             }
             if self.sound_timer > 0 {
-                self.graphics.beep();
+                self.graphics.beep(); // TODO: Implement
                 self.sound_timer -= 1;
             }
 

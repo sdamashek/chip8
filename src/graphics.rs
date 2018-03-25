@@ -29,6 +29,8 @@ pub enum DrawResult {
 }
 
 impl Graphics {
+    // Construct a new Graphics struct.
+    // Initializes sdl2 and defines an sdl context.
     pub fn new() -> Graphics {
         let sdl_context = sdl2::init().unwrap();
         let video_subsys = sdl_context.video().unwrap();
@@ -54,6 +56,7 @@ impl Graphics {
         }
     }
 
+    // Map an SDL Keycode enum to a CHIP8 key, if any.
     fn key_ind(&self, keycode: Keycode) -> Option<usize> {
         match keycode {
             Keycode::Num1 => Some(0x1),
@@ -76,6 +79,8 @@ impl Graphics {
         }
     }
 
+    // Draw a CHIP8 sprite from a slice to (x, y).
+    // If a collision occurs, return Collision. Otherwise, return Success.
     pub fn draw_sprite<'a>(&mut self, x: u8, y: u8, slice: &'a [u8]) -> DrawResult {
         let l = slice.len();
         let mut collision = false;
@@ -126,6 +131,7 @@ impl Graphics {
         }
     }
 
+    // Clear the canvas.
     pub fn clear(&mut self) {
         for i in 0..self.screen.len() {
             self.screen[i] = false;
@@ -135,6 +141,7 @@ impl Graphics {
         self.canvas.present();
     }
 
+    // Process all queued key events.
     pub fn draw_events(&mut self) {
         let mut events = self.context.event_pump().unwrap();
 
